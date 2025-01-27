@@ -1,3 +1,9 @@
 .venv/
-
+lung_n/
+lung_scc/
+lung_aca/
 lung_image_sets/
+test_set.csv
+train_set.csv
+features.pkl
+graph.pkl
