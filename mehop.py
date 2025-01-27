@@ -12,6 +12,10 @@ import time
 import gc
 import faiss
 from scipy.sparse import lil_matrix
+from torchvision.models import ResNet50_Weights
+from concurrent.futures import ProcessPoolExecutor
+import networkx as nx
+
 
 # Check GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,7 +132,7 @@ def build_graph_from_features_faiss(feature_file, graph_file, similarity_thresho
     log_time("build_graph_from_features (FAISS)", start_time)
 
 #Chunk based
-def build_graph_from_features_chunked(feature_file, graph_file, similarity_threshold=0.5, chunk_size=100):
+def build_graph_from_features_chunked(feature_file, graph_file, similarity_threshold=0.5, chunk_size=64):
     """Build graph using chunk-based processing with progress bars."""
     print("\n--- Starting build_graph_from_features (Chunked) ---")
     start_time = time.time()
@@ -220,6 +224,63 @@ def build_graph_from_features_sparse(feature_file, graph_file, similarity_thresh
     log_time("build_graph_from_features (Sparse Matrix)", start_time)
 
 
+def compute_chunk_similarity(start_i, end_i, start_j, end_j, features, nodes, similarity_threshold):
+    """Compute similarities between two chunks and return edges."""
+    chunk_i = features[start_i:end_i]
+    chunk_j = features[start_j:end_j]
+
+    similarities = chunk_i @ chunk_j.T  # Compute pairwise similarities
+    norms_i = chunk_i.norm(dim=1).unsqueeze(1)
+    norms_j = chunk_j.norm(dim=1).unsqueeze(0)
+    similarities = similarities / (norms_i @ norms_j)  # Normalize similarities
+
+    edges = []
+    for i, j in zip(*torch.where(similarities > similarity_threshold)):
+        node_i = nodes[start_i + i.item()]
+        node_j = nodes[start_j + j.item()]
+        if start_i + i < start_j + j:  # Avoid duplicate edges
+            edges.append((node_i, node_j, similarities[i, j].item()))
+
+    return edges
+
+def build_graph_from_features_parallel(feature_file, graph_file, similarity_threshold=0.5, chunk_size=100, max_workers=4):
+    """Build graph using parallelized chunk processing."""
+    print("\n--- Starting build_graph_from_features_parallel ---")
+    start_time = time.time()
+
+    # Load features from file
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = torch.tensor(
+        np.array([features_dict[n]['features'] for n in nodes]),
+        device=device
+    )
+
+    # Prepare tasks for parallel processing
+    tasks = []
+    for start_i in range(0, len(nodes), chunk_size):
+        end_i = min(start_i + chunk_size, len(nodes))
+        for start_j in range(start_i, len(nodes), chunk_size):
+            end_j = min(start_j + chunk_size, len(nodes))
+            tasks.append((start_i, end_i, start_j, end_j, features, nodes, similarity_threshold))
+
+    # Process tasks in parallel
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        results = list(tqdm(executor.map(lambda args: compute_chunk_similarity(*args), tasks), total=len(tasks), desc="Processing chunks"))
+
+    # Combine results into the graph
+    for edges in results:
+        G.add_weighted_edges_from(edges)
+
+    # Save the graph
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+
+    log_time("build_graph_from_features_parallel", start_time)
+
 def main(base_folder, batch_size=64):
     """Main pipeline for feature extraction and graph building."""
     print("\n--- Starting main ---")
@@ -240,14 +301,14 @@ def main(base_folder, batch_size=64):
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     
     # Load pretrained model on GPU
-    model = resnet50(pretrained=True).to(device)
+    model = resnet50(weights=ResNet50_Weights.DEFAULT).to(device)
     
     feature_file = "features.pkl"
     # extract_features_batch(model, dataloader, feature_file, batch_size=batch_size)
     
     # Build graph using extracted features
     graph_file = "graph.pkl"
-    build_graph_from_features_chunked(feature_file, graph_file)
+    build_graph_from_features_parallel(feature_file, graph_file)
     
     log_time("main", start_time)
 
