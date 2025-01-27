@@ -10,6 +10,8 @@ import pickle
 from tqdm import tqdm  # For progress display
 import time
 import gc
+import faiss
+from scipy.sparse import lil_matrix
 
 # Check GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -96,6 +98,128 @@ def build_graph_from_features(feature_file, graph_file, similarity_threshold=0.5
     
     log_time("build_graph_from_features", start_time)
 
+#using Faiss-cpu
+def build_graph_from_features_faiss(feature_file, graph_file, similarity_threshold=0.5, top_k=10):
+    """Build graph using FAISS for approximate nearest neighbors."""
+    print("\n--- Starting build_graph_from_features (FAISS) ---")
+    start_time = time.time()
+    import networkx as nx
+    
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+    
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = np.array([features_dict[n]['features'] for n in nodes])
+    
+    # Use FAISS for nearest neighbor search
+    index = faiss.IndexFlatL2(features.shape[1])  # L2 distance
+    index.add(features)  # Add features to FAISS index
+    distances, indices = index.search(features, top_k)  # Find top_k nearest neighbors
+    
+    for i, (node, neighbors) in enumerate(zip(nodes, indices)):
+        for j, dist in zip(neighbors, distances[i]):
+            if i != j and dist < similarity_threshold:
+                G.add_edge(node, nodes[j], weight=1 - dist)  # Convert distance to similarity
+    
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+    
+    log_time("build_graph_from_features (FAISS)", start_time)
+
+#Chunk based
+def build_graph_from_features_chunked(feature_file, graph_file, similarity_threshold=0.5, chunk_size=100):
+    """Build graph using chunk-based processing with progress bars."""
+    print("\n--- Starting build_graph_from_features (Chunked) ---")
+    start_time = time.time()
+    import networkx as nx
+
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+    
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = torch.tensor(
+        np.array([features_dict[n]['features'] for n in nodes]),
+        device=device
+    )
+
+    outer_progress = tqdm(range(0, len(nodes), chunk_size), desc="Processing outer chunks")  # Outer loop
+    for start_i in outer_progress:
+        end_i = min(start_i + chunk_size, len(nodes))
+        chunk_i = features[start_i:end_i]
+        
+        inner_progress = tqdm(range(start_i, len(nodes), chunk_size), desc="Processing inner chunks", leave=False)  # Inner loop
+        for start_j in inner_progress:
+            end_j = min(start_j + chunk_size, len(nodes))
+            chunk_j = features[start_j:end_j]
+            
+            similarities = chunk_i @ chunk_j.T
+            norms_i = chunk_i.norm(dim=1).unsqueeze(1)
+            norms_j = chunk_j.norm(dim=1).unsqueeze(0)
+            similarities = similarities / (norms_i @ norms_j)  # Normalize similarities
+            
+            for i, j in zip(*torch.where(similarities > similarity_threshold)):
+                if start_i + i < start_j + j:  # Avoid duplicate edges
+                    G.add_edge(
+                        nodes[start_i + i], nodes[start_j + j],
+                        weight=similarities[i, j].item()
+                    )
+            
+            # Free memory
+            del chunk_j, similarities
+            torch.cuda.empty_cache()
+
+        # Free memory
+        del chunk_i
+        torch.cuda.empty_cache()
+    
+    # Save graph
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+    
+    log_time("build_graph_from_features (Chunked)", start_time)
+
+#sparse matrix
+
+def build_graph_from_features_sparse(feature_file, graph_file, similarity_threshold=0.5):
+    """Build graph using sparse similarity matrix."""
+    print("\n--- Starting build_graph_from_features (Sparse Matrix) ---")
+    start_time = time.time()
+    import networkx as nx
+
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+    
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = torch.tensor(
+        np.array([features_dict[n]['features'] for n in nodes]),
+        device=device
+    )
+    
+    n = len(nodes)
+    sparse_matrix = lil_matrix((n, n), dtype=np.float32)
+    
+    for i in tqdm(range(n), desc="Building sparse matrix"):
+        similarities = features[i] @ features.T
+        norms = features.norm(dim=1)
+        similarities = similarities / (norms[i] * norms)  # Normalize similarities
+        for j in range(n):
+            if i != j and similarities[j] > similarity_threshold:
+                sparse_matrix[i, j] = similarities[j].item()
+    
+    # Build graph from sparse matrix
+    G.add_weighted_edges_from(
+        [(nodes[i], nodes[j], sparse_matrix[i, j]) for i, j in zip(*sparse_matrix.nonzero())]
+    )
+    
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+    
+    log_time("build_graph_from_features (Sparse Matrix)", start_time)
+
+
 def main(base_folder, batch_size=64):
     """Main pipeline for feature extraction and graph building."""
     print("\n--- Starting main ---")
@@ -123,7 +247,7 @@ def main(base_folder, batch_size=64):
     
     # Build graph using extracted features
     graph_file = "graph.pkl"
-    build_graph_from_features(feature_file, graph_file)
+    build_graph_from_features_chunked(feature_file, graph_file)
     
     log_time("main", start_time)
 
