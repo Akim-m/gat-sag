@@ -243,6 +243,12 @@ def compute_chunk_similarity(start_i, end_i, start_j, end_j, features, nodes, si
 
     return edges
 
+def process_task(args):
+    """Wrapper to make compute_chunk_similarity picklable."""
+    return compute_chunk_similarity(*args)
+
+
+
 def build_graph_from_features_parallel(feature_file, graph_file, similarity_threshold=0.5, chunk_size=100, max_workers=4):
     """Build graph using parallelized chunk processing."""
     print("\n--- Starting build_graph_from_features_parallel ---")
@@ -269,7 +275,7 @@ def build_graph_from_features_parallel(feature_file, graph_file, similarity_thre
 
     # Process tasks in parallel
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(executor.map(lambda args: compute_chunk_similarity(*args), tasks), total=len(tasks), desc="Processing chunks"))
+        results = list(tqdm(executor.map(process_task, tasks), total=len(tasks), desc="Processing chunks"))
 
     # Combine results into the graph
     for edges in results:
