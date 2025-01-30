@@ -14,7 +14,7 @@ feature_similarity_graph.png
 features.csv
 similarity_graph.png
 resnet_model.pth
-gpu_version/
+gpu_versions/
 deepsek/
 mehop_gui_v1.py
 mehop_gui_v2.py
