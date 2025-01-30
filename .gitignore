@@ -8,3 +8,16 @@ train_set.csv
 features.pkl
 graph.pkl
 graph.pkl.temp
+graph_visualization.png
+mehop.cpython-312.pyc
+feature_similarity_graph.png
+features.csv
+similarity_graph.png
+resnet_model.pth
+gpu_version/
+deepsek/
+mehop_gui_v1.py
+mehop_gui_v2.py
+mehp.ipynb
+test/
+train/

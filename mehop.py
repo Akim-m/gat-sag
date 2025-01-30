@@ -15,11 +15,54 @@ from scipy.sparse import lil_matrix
 from torchvision.models import ResNet50_Weights
 from concurrent.futures import ProcessPoolExecutor
 import networkx as nx
-
+import matplotlib.pyplot as plt
 
 # Check GPU availability
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+
+def visualize_graph(graph_file):
+    """Visualize the graph stored in the specified file."""
+    with open(graph_file, 'rb') as f:
+        G = pickle.load(f)
+    
+    # Draw the graph
+    plt.figure(figsize=(10, 10))
+    pos = nx.spring_layout(G, seed=42)  # Positioning of nodes
+    nx.draw(
+        G, pos,
+        with_labels=True,
+        node_size=50,
+        node_color="blue",
+        edge_color="gray",
+        alpha=0.7,
+        font_size=8
+    )
+    plt.title("Graph Visualization")
+    plt.show()
+
+
+def save_graph_as_png(graph_file, save_path):
+    """Save the graph visualization as a PNG file."""
+    with open(graph_file, 'rb') as f:
+        G = pickle.load(f)
+    
+    # Draw the graph
+    plt.figure(figsize=(10, 10))
+    pos = nx.spring_layout(G, seed=42)  # Positioning of nodes
+    nx.draw(
+        G, pos,
+        with_labels=True,
+        node_size=50,
+        node_color="blue",
+        edge_color="gray",
+        alpha=0.7,
+        font_size=8
+    )
+    plt.title("Graph Visualization")
+    plt.savefig(save_path, format='png', dpi=300)
+    plt.close()
+
 
 def log_time(function_name, start_time):
     """Log the execution time of a function."""
@@ -94,11 +137,15 @@ def build_graph_from_features(feature_file, graph_file, similarity_threshold=0.5
     
     for i in tqdm(range(len(nodes)), desc="Building graph"):
         for j in range(i + 1, len(nodes)):
-            if similarities[i, j] > similarity_threshold:
-                G.add_edge(nodes[i], nodes[j], weight=similarities[i, j].item())
+            sim = similarities[i, j].item()  # Extract similarity
+            if sim > similarity_threshold:
+                print(f"Edge added between {nodes[i]} and {nodes[j]} with similarity {sim}")
+                G.add_edge(nodes[i], nodes[j], weight=sim)
+
     
     with open(graph_file, 'wb') as f:
         pickle.dump(G, f)
+    print(f"Graph saved with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
     
     log_time("build_graph_from_features", start_time)
 
@@ -229,27 +276,35 @@ def compute_chunk_similarity(start_i, end_i, start_j, end_j, features, nodes, si
     chunk_i = features[start_i:end_i]
     chunk_j = features[start_j:end_j]
 
-    similarities = chunk_i @ chunk_j.T  # Compute pairwise similarities
-    norms_i = chunk_i.norm(dim=1).unsqueeze(1)
-    norms_j = chunk_j.norm(dim=1).unsqueeze(0)
-    similarities = similarities / (norms_i @ norms_j)  # Normalize similarities
+    # Compute pairwise similarities
+    similarities = np.dot(chunk_i, chunk_j.T)  # Matrix multiplication
 
+    # Compute norms using NumPy
+    norms_i = np.linalg.norm(chunk_i, axis=1).reshape(-1, 1)  # Column vector
+    norms_j = np.linalg.norm(chunk_j, axis=1).reshape(1, -1)  # Row vector
+
+    # Normalize similarities
+    similarities = similarities / (norms_i @ norms_j)  # Element-wise division
+
+    # Filter edges above the similarity threshold
     edges = []
-    for i, j in zip(*torch.where(similarities > similarity_threshold)):
-        node_i = nodes[start_i + i.item()]
-        node_j = nodes[start_j + j.item()]
-        if start_i + i < start_j + j:  # Avoid duplicate edges
-            edges.append((node_i, node_j, similarities[i, j].item()))
+    for i in range(similarities.shape[0]):
+        for j in range(similarities.shape[1]):
+            if similarities[i, j] > similarity_threshold:
+                node_i = nodes[start_i + i]
+                node_j = nodes[start_j + j]
+                if start_i + i < start_j + j:  # Avoid duplicate edges
+                    edges.append((node_i, node_j, similarities[i, j]))
 
     return edges
+
 
 def process_task(args):
     """Wrapper to make compute_chunk_similarity picklable."""
     return compute_chunk_similarity(*args)
 
 
-
-def build_graph_from_features_parallel(feature_file, graph_file, similarity_threshold=0.5, chunk_size=100, max_workers=4):
+def build_graph_from_features_parallel(feature_file, graph_file, similarity_threshold=0.05, chunk_size=100, max_workers=4):
     """Build graph using parallelized chunk processing."""
     print("\n--- Starting build_graph_from_features_parallel ---")
     start_time = time.time()
@@ -260,10 +315,8 @@ def build_graph_from_features_parallel(feature_file, graph_file, similarity_thre
 
     G = nx.Graph()
     nodes = list(features_dict.keys())
-    features = torch.tensor(
-        np.array([features_dict[n]['features'] for n in nodes]),
-        device=device
-    )
+    # Convert features to NumPy (CPU-based) for multiprocessing
+    features = np.array([features_dict[n]['features'] for n in nodes])
 
     # Prepare tasks for parallel processing
     tasks = []
@@ -278,14 +331,120 @@ def build_graph_from_features_parallel(feature_file, graph_file, similarity_thre
         results = list(tqdm(executor.map(process_task, tasks), total=len(tasks), desc="Processing chunks"))
 
     # Combine results into the graph
+    edge_count = 0
     for edges in results:
-        G.add_weighted_edges_from(edges)
+        if edges:
+            G.add_weighted_edges_from(edges)
+            edge_count += len(edges)
+    
+    print(f"Total edges added: {edge_count}")
+    print(f"Final graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
 
     # Save the graph
     with open(graph_file, 'wb') as f:
         pickle.dump(G, f)
 
     log_time("build_graph_from_features_parallel", start_time)
+
+from concurrent.futures import ThreadPoolExecutor
+
+def build_graph_from_features_parallel_gpu(feature_file, graph_file, similarity_threshold=0.05, chunk_size=100, max_workers=4):
+    """Build graph using parallelized chunk processing with GPU support."""
+    print("\n--- Starting build_graph_from_features_parallel (GPU-enabled) ---")
+    start_time = time.time()
+
+    # Load features from file
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = torch.tensor(
+        np.array([features_dict[n]['features'] for n in nodes]),
+        device=device
+    )  # Keep features on GPU
+
+    # Prepare tasks for parallel processing
+    tasks = []
+    for start_i in range(0, len(nodes), chunk_size):
+        end_i = min(start_i + chunk_size, len(nodes))
+        for start_j in range(start_i, len(nodes), chunk_size):
+            end_j = min(start_j + chunk_size, len(nodes))
+            tasks.append((start_i, end_i, start_j, end_j, features, nodes, similarity_threshold))
+
+    # Process tasks in parallel using threads
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(tqdm(executor.map(process_task, tasks), total=len(tasks), desc="Processing chunks"))
+
+    # Combine results into the graph
+    edge_count = 0
+    for edges in results:
+        if edges:
+            G.add_weighted_edges_from(edges)
+            edge_count += len(edges)
+
+    print(f"Total edges added: {edge_count}")
+    print(f"Final graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+
+    # Save the graph
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+
+    log_time("build_graph_from_features_parallel (GPU-enabled)", start_time)
+
+def build_graph_from_features_chunked_gpu(feature_file, graph_file, similarity_threshold=0.05, chunk_size=100):
+    """Build graph using chunk-based processing entirely on the GPU, with progress for inner chunks."""
+    print("\n--- Starting build_graph_from_features_chunked (GPU-enabled) ---")
+    start_time = time.time()
+
+    # Load features from file
+    with open(feature_file, 'rb') as f:
+        features_dict = pickle.load(f)
+
+    G = nx.Graph()
+    nodes = list(features_dict.keys())
+    features = torch.tensor(
+        np.array([features_dict[n]['features'] for n in nodes]),
+        device=device
+    )  # Keep features on GPU
+
+    # Process chunks
+    outer_progress = tqdm(range(0, len(nodes), chunk_size), desc="Processing outer chunks")
+    for start_i in outer_progress:
+        end_i = min(start_i + chunk_size, len(nodes))
+        chunk_i = features[start_i:end_i]
+
+        inner_progress = tqdm(range(start_i, len(nodes), chunk_size), desc="Processing inner chunks", leave=False)
+        for start_j in inner_progress:
+            end_j = min(start_j + chunk_size, len(nodes))
+            chunk_j = features[start_j:end_j]
+
+            # Compute similarities on GPU
+            similarities = chunk_i @ chunk_j.T
+            norms_i = chunk_i.norm(dim=1).unsqueeze(1)
+            norms_j = chunk_j.norm(dim=1).unsqueeze(0)
+            similarities = similarities / (norms_i @ norms_j)
+
+            # Add edges above the similarity threshold
+            for i, j in zip(*torch.where(similarities > similarity_threshold)):
+                if start_i + i < start_j + j:  # Avoid duplicate edges
+                    G.add_edge(
+                        nodes[start_i + i.item()], nodes[start_j + j.item()],
+                        weight=similarities[i, j].item()
+                    )
+
+            torch.cuda.empty_cache()  # Free GPU memory after each inner chunk
+
+        torch.cuda.empty_cache()  # Free GPU memory after each outer chunk
+
+    print(f"Final graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+
+    # Save the graph
+    with open(graph_file, 'wb') as f:
+        pickle.dump(G, f)
+
+    log_time("build_graph_from_features_chunked (GPU-enabled)", start_time)
+
 
 def main(base_folder, batch_size=64):
     """Main pipeline for feature extraction and graph building."""
@@ -314,9 +473,12 @@ def main(base_folder, batch_size=64):
     
     # Build graph using extracted features
     graph_file = "graph.pkl"
-    build_graph_from_features_parallel(feature_file, graph_file)
+    build_graph_from_features_chunked_gpu(feature_file, graph_file)
     
-    log_time("main", start_time)
+    # log_time("main", start_time)
+    save_graph_as_png("graph.pkl", "graph_visualization.png")
+
+
 
 if __name__ == "__main__":
     main("lung_image_sets", batch_size=16)
