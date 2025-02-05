@@ -393,11 +393,11 @@ def build_graph_from_features_parallel_gpu(feature_file, graph_file, similarity_
     log_time("build_graph_from_features_parallel (GPU-enabled)", start_time)
 
 def build_graph_from_features_chunked_gpu(feature_file, graph_file, similarity_threshold=0.05, chunk_size=100):
-    """Build graph using chunk-based processing entirely on the GPU, with progress for inner chunks."""
+
     print("\n--- Starting build_graph_from_features_chunked (GPU-enabled) ---")
     start_time = time.time()
 
-    # Load features from file
+
     with open(feature_file, 'rb') as f:
         features_dict = pickle.load(f)
 
@@ -406,9 +406,9 @@ def build_graph_from_features_chunked_gpu(feature_file, graph_file, similarity_t
     features = torch.tensor(
         np.array([features_dict[n]['features'] for n in nodes]),
         device=device
-    )  # Keep features on GPU
+    )  
 
-    # Process chunks
+
     outer_progress = tqdm(range(0, len(nodes), chunk_size), desc="Processing outer chunks")
     for start_i in outer_progress:
         end_i = min(start_i + chunk_size, len(nodes))
@@ -419,23 +419,23 @@ def build_graph_from_features_chunked_gpu(feature_file, graph_file, similarity_t
             end_j = min(start_j + chunk_size, len(nodes))
             chunk_j = features[start_j:end_j]
 
-            # Compute similarities on GPU
+
             similarities = chunk_i @ chunk_j.T
             norms_i = chunk_i.norm(dim=1).unsqueeze(1)
             norms_j = chunk_j.norm(dim=1).unsqueeze(0)
             similarities = similarities / (norms_i @ norms_j)
 
-            # Add edges above the similarity threshold
+
             for i, j in zip(*torch.where(similarities > similarity_threshold)):
-                if start_i + i < start_j + j:  # Avoid duplicate edges
+                if start_i + i < start_j + j:  
                     G.add_edge(
                         nodes[start_i + i.item()], nodes[start_j + j.item()],
                         weight=similarities[i, j].item()
                     )
 
-            torch.cuda.empty_cache()  # Free GPU memory after each inner chunk
+            torch.cuda.empty_cache() 
 
-        torch.cuda.empty_cache()  # Free GPU memory after each outer chunk
+        torch.cuda.empty_cache() 
 
     print(f"Final graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
 
@@ -447,7 +447,6 @@ def build_graph_from_features_chunked_gpu(feature_file, graph_file, similarity_t
 
 
 def main(base_folder, batch_size=64):
-    """Main pipeline for feature extraction and graph building."""
     print("\n--- Starting main ---")
     start_time = time.time()
     
@@ -457,25 +456,25 @@ def main(base_folder, batch_size=64):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
-    # Scan dataset
-    print("Scanning dataset...")
+
+    print("Scanning ")
     data = [(os.path.join(root, file), os.path.basename(root)) for root, _, files in os.walk(base_folder) for file in files]
     df = pd.DataFrame(data, columns=['FilePath', 'Label'])
     
     dataset = ImageDataset(df, transform=transform)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     
-    # Load pretrained model on GPU
+
     model = resnet50(weights=ResNet50_Weights.DEFAULT).to(device)
     
     feature_file = "features.pkl"
-    # extract_features_batch(model, dataloader, feature_file, batch_size=batch_size)
+
     
-    # Build graph using extracted features
+
     graph_file = "graph.pkl"
     build_graph_from_features_chunked_gpu(feature_file, graph_file)
     
-    # log_time("main", start_time)
+
     save_graph_as_png("graph.pkl", "graph_visualization.png")
 
 

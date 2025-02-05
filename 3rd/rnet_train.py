@@ -18,22 +18,22 @@ def train_resnet(data_dir="lung_image_sets/", batch_size=32, num_epochs=10, lr=0
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     
-    # Load dataset
+ 
     train_dataset = datasets.ImageFolder(root=data_dir, transform=transform)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     
     num_classes = len(train_dataset.classes)
     
-    # Load ResNet50 without pre-trained weights
+
     model.load_state_dict(torch.load("resnet_model.pth", map_location="cuda" if torch.cuda.is_available() else "cpu"))
-    model.fc = nn.Linear(model.fc.in_features, num_classes)  # Modify final layer for classification
+    model.fc = nn.Linear(model.fc.in_features, num_classes)  
     model = model.to(device)
     
-    # Define loss function and optimizer
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
-    # Training loop
+
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -48,7 +48,7 @@ def train_resnet(data_dir="lung_image_sets/", batch_size=32, num_epochs=10, lr=0
         
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(train_loader):.4f}")
     
-    # Save the trained model
+
     torch.save(model.state_dict(), model_save_path)
     print(f"Model saved to {model_save_path}")
 
@@ -66,10 +66,10 @@ def extract_features(data_dir="lung_image_sets/", model_path="resnet_model.pth",
     
     num_classes = len(dataset.classes)
     model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)  # Ensure consistency with training
+    model.fc = nn.Linear(model.fc.in_features, num_classes) 
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     
-    # Remove classification layer for feature extraction
+
     model.fc = nn.Identity()
     model = model.to(device)
     model.eval()
